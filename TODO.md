@@ -7,8 +7,8 @@
 
 - [x] 初始化仓库结构
 - [x] Win32 宿主壳最小 demo(窗口 + 原生菜单 + 占位画布)
-- [ ] Docker 交叉编译环境搭建(AOSP → Windows 原生产物)
-- [ ] CI 基础配置
+- [x] CI 基础配置(GitHub Actions:远程构建 ART host,产物下载回本地)
+- [ ] 用 CI 产物跑通 ART host 基线(验证 dalvikvm / dex2oat 可用)
 
 ## 里程碑 1 — 纯 Java 应用
 

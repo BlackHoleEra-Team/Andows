@@ -1,0 +1,59 @@
+name: build-art-host
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  art-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git repo openjdk-17-jdk
+          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> "$GITHUB_ENV"
+
+      - name: 同步 AOSP 源码(部分仓库,android-16)
+        run: |
+          git config --global user.email "ci@andows.dev"
+          git config --global user.name "Andows CI"
+          mkdir -p aosp && cd aosp
+          repo init -u https://android.googlesource.com/platform/manifest -b android-16.0.0_r1
+          repo sync -c -j4 \
+            art \
+            libcore \
+            system/core \
+            system/libbase \
+            frameworks/base \
+            frameworks/native \
+            build \
+            prebuilts/clang/host/linux-x86
+
+      - name: 构建 ART host
+        run: |
+          cd aosp
+          source build/envsetup.sh
+          lunch aosp_x86_64-eng
+          make -j$(nproc) art 2>&1 | tee art-build.log
+        env:
+          # 减小调试符号体积,降低磁盘占用
+          USE_CLANG_PLATFORM_BUILD: "true"
+
+      - name: 上传 ART host 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: art-host-linux-x86_64
+          path: aosp/out/host/linux-x86/
+          if-no-files-found: error
+
+      - name: 上传构建日志
+        uses: actions/upload-artifact@v4
+        with:
+          name: art-build-log
+          path: aosp/art-build.log
+          if-no-files-found: warn
