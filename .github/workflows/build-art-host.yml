@@ -33,9 +33,10 @@ jobs:
             frameworks/native \
             build/make \
             build/soong \
+            device/generic/common \
+            device/generic/x86_64 \
             prebuilts/build-tools \
-            prebuilts/clang/host/linux-x86 \
-            prebuilts/python/linux-x86
+            prebuilts/clang/host/linux-x86
 
       - name: 构建 ART host
         run: |
