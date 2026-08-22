@@ -2,6 +2,9 @@
 build/
 out/
 
+# 本地 AOSP 源码(不进 git,由 CI 远程构建)
+Aosp/
+
 # Visual Studio
 .vs/
 *.user
