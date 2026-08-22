@@ -31,8 +31,11 @@ jobs:
             system/libbase \
             frameworks/base \
             frameworks/native \
-            build \
-            prebuilts/clang/host/linux-x86
+            build/make \
+            build/soong \
+            prebuilts/build-tools \
+            prebuilts/clang/host/linux-x86 \
+            prebuilts/python/linux-x86
 
       - name: 构建 ART host
         run: |
