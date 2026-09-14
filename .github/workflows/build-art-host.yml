@@ -1,63 +1,147 @@
 name: build-art-host
 
+# 目标:在 GitHub 托管 runner 上编译 AOSP 的 ART host(dalvikvm / dex2oat),验证里程碑 0 的基线。
+#
+# 为什么选 Android 8.1:
+#   - 8.1 是"日用的最小可用版本",源码体积远小于 android-16(官方要求 400GB,免费 runner 只有 ~53GB)。
+#   - android-16 在免费 runner 上物理上不可能:仅检出就 ~90GB(浅克隆)~ 250GB(完整)。
+#
+# 两个关键工程约束(不要随意改动):
+#   1) 磁盘:ubuntu-latest 整块盘 72GB、开机仅 ~22GB 可用,必须先清理宿主机(约 +31GB)。
+#      注意:不能用 job 级 container —— 那样清理的是容器层,宿主磁盘不会真正释放。
+#   2) 工具链:Android 8.1 需要 OpenJDK 8 + Python 2.7 + 老 prebuilts,在 ubuntu-24.04 上无法直接编译,
+#      因此编译阶段放进 ubuntu:20.04 容器(同时 git>=2.19 才能用 --partial-clone)。
+#
+# 源码策略:"不含 repo 历史"= 浅克隆 + 部分克隆(blob:none)。
+#   这只能压缩 .repo;工作目录(检出文件)体积不变,那才是大头,也正是下面"报告源码体积"要实测的对象。
+
 on:
   workflow_dispatch:
   push:
     branches: [main]
+    paths:
+      - ".github/workflows/build-art-host.yml"
+
+env:
+  # 8.1 的最后一个发布分支
+  AOSP_BRANCH: android-8.1.0_r81
 
 jobs:
   art-host:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
+    timeout-minutes: 350
     steps:
       - uses: actions/checkout@v4
 
-      - name: 安装构建依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git repo openjdk-17-jdk
-          echo "JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64" >> "$GITHUB_ENV"
+      # 释放 ~31GB:ubuntu-latest 开机只有 ~22GB 可用,AOSP 检出放不下。
+      - name: 释放磁盘空间
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          swap-storage: true
+          tool-cache: false
 
-      - name: 同步 AOSP 源码(部分仓库,android-16)
+      - name: 记录初始磁盘
+        run: df -h /
+
+      # 在宿主机同步(用 python3 + 现代 git,支持 --partial-clone),
+      # 源码树落在宿主机磁盘上,便于统计体积并上传产物。
+      - name: 同步 AOSP 8.1 源码(浅克隆,不含历史)
         run: |
+          sudo curl -fsSL -o /usr/local/bin/repo https://storage.googleapis.com/git-repo-downloads/repo
+          sudo chmod a+x /usr/local/bin/repo
           git config --global user.email "ci@andows.dev"
           git config --global user.name "Andows CI"
           mkdir -p aosp && cd aosp
-          repo init -u https://android.googlesource.com/platform/manifest -b android-16.0.0_r1
-          repo sync -c -j4 \
-            art \
-            libcore \
-            system/core \
-            system/libbase \
-            frameworks/base \
-            frameworks/native \
-            build/make \
-            build/soong \
-            device/generic/common \
-            device/generic/x86_64 \
-            prebuilts/build-tools \
-            prebuilts/clang/host/linux-x86
+          repo init --partial-clone -u https://android.googlesource.com/platform/manifest -b "$AOSP_BRANCH"
+          repo sync -c --no-tags --force-sync -j"$(nproc)"
 
-      - name: 构建 ART host
+      # 自诊断:.repo 与工作目录分开统计,一次就能判断免费 runner 的 ~53GB 到底够不够。
+      - name: 报告源码体积
         run: |
-          cd aosp
-          source build/envsetup.sh
-          lunch aosp_x86_64-eng
-          make -j$(nproc) art 2>&1 | tee art-build.log
-        env:
-          # 减小调试符号体积,降低磁盘占用
-          USE_CLANG_PLATFORM_BUILD: "true"
+          df -h /
+          echo "---- .repo(可被浅克隆压缩) ----"
+          du -sh aosp/.repo 2>/dev/null || true
+          echo "---- 工作目录(压缩不掉,大头) ----"
+          du -sh --exclude=.repo aosp 2>/dev/null || true
+          echo "---- 工作目录 Top 15 ----"
+          du -sh aosp/* 2>/dev/null | sort -hr | head -15 || true
+
+      # 编译阶段:8.1 需要 OpenJDK 8 + Python 2,故放进 ubuntu:20.04 容器。
+      # 容器把工作区挂进来,产物仍写在宿主机磁盘上。
+      # 只用 -o pipefail(不加 -e):envsetup.sh 内部有会返回非 0 的语句,加 -e 会被误伤提前退出。
+      - name: 编译 ART host(ubuntu:20.04 容器,OpenJDK 8 / Python 2)
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ubuntu:20.04 bash -o pipefail -c '
+              set -e
+              apt-get update
+              # 必需依赖:任何一个装不上都应该直接失败
+              apt-get install -y --no-install-recommends \
+                git curl ca-certificates openjdk-8-jdk \
+                python2.7 python2 \
+                flex bison gperf build-essential make zip unzip \
+                zlib1g-dev libncurses5 libxml2-utils xsltproc file rsync
+              # 可选依赖:20.04 上个别包名可能变动,装不上就跳过
+              for p in libx11-dev libgl1-mesa-dev x11proto-core-dev libc6-dev-i386 lib32z1-dev; do
+                apt-get install -y --no-install-recommends "$p" || echo "跳过可选依赖: $p"
+              done
+              # AOSP 8.1 的构建脚本调用 python,必须指向 Python 2
+              ln -sf /usr/bin/python2.7 /usr/bin/python
+              export JAVA_HOME=/usr/lib/jvm/java-8-openjdk-amd64
+              export PATH="$JAVA_HOME/bin:$PATH"
+              java -version
+
+              set +e
+              cd /work/aosp
+              source build/envsetup.sh
+              # 8.1 仍是旧式两段 combo;该 product 已核实存在于 build/make/target/product/aosp_x86_64.mk
+              lunch aosp_x86_64-eng
+              make -j"$(nproc)" dalvikvm dex2oat 2>&1 | tee /work/art-build.log
+            '
+
+      # 里程碑 0 的验收动作:确认产物是 x86_64 可执行文件且能正常启动。
+      - name: 验证 dalvikvm / dex2oat 可用
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work" \
+            -w /work \
+            -e DEBIAN_FRONTEND=noninteractive \
+            ubuntu:20.04 bash -eo pipefail -c '
+              apt-get update
+              apt-get install -y --no-install-recommends file libc6 libncurses5
+              BIN=/work/aosp/out/host/linux-x86/bin
+              ls -l "$BIN/dalvikvm" "$BIN/dex2oat"
+              file "$BIN/dex2oat" | grep -q "ELF 64-bit" && echo "dex2oat 是 x86_64 ELF 可执行文件"
+              file "$BIN/dalvikvm" | grep -q "ELF 64-bit" && echo "dalvikvm 是 x86_64 ELF 可执行文件"
+              # 打印用法,证明二进制真的能跑起来(退出码不计入)
+              set +e
+              ANDROID_DATA=/tmp/ad "$BIN/dex2oat" --help 2>&1 | head -n 5
+              ANDROID_DATA=/tmp/ad "$BIN/dalvikvm" -help 2>&1 | head -n 5
+            '
 
       - name: 上传 ART host 产物
         uses: actions/upload-artifact@v4
         with:
           name: art-host-linux-x86_64
-          path: aosp/out/host/linux-x86/
-          if-no-files-found: error
+          path: |
+            aosp/out/host/linux-x86/bin/dalvikvm
+            aosp/out/host/linux-x86/bin/dalvikvm32
+            aosp/out/host/linux-x86/bin/dex2oat
+            aosp/out/host/linux-x86/bin/dex2oatd
+            aosp/out/host/linux-x86/lib64/libart*.so
+          if-no-files-found: warn
 
       - name: 上传构建日志
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: art-build-log
-          path: aosp/art-build.log
+          path: art-build.log
           if-no-files-found: warn
