@@ -57,7 +57,19 @@ jobs:
           git config --global user.name "Andows CI"
           mkdir -p aosp && cd aosp
           repo init --partial-clone -u https://android.googlesource.com/platform/manifest -b "$AOSP_BRANCH"
-          repo sync -c --no-tags --force-sync -j"$(nproc)"
+          # googlesource 在并发 partial clone 时偶发 HTTP 502(RPC failed),
+          # repo sync 可断点续传,直接重试即可,不必重头来过。
+          for attempt in 1 2 3 4 5; do
+            echo "==== repo sync 第 $attempt 次尝试 ===="
+            if repo sync -c --no-tags -j"$(nproc)"; then
+              echo "==== repo sync 成功 ===="
+              break
+            fi
+            echo "==== 第 $attempt 次失败,$((attempt * 30))s 后重试 ===="
+            sleep $((attempt * 30))
+          done
+          # 兜底:重试仍失败必须让这一步挂掉,避免带着残缺的源码树继续编译
+          repo sync -c --no-tags -j"$(nproc)"
 
       # 自诊断:.repo 与工作目录分开统计,一次就能判断免费 runner 的 ~53GB 到底够不够。
       - name: 报告源码体积
