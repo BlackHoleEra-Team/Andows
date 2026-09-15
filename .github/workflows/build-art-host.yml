@@ -129,25 +129,35 @@ jobs:
               apt-get update
               apt-get install -y --no-install-recommends file libc6 libncurses5
               BIN=/work/aosp/out/host/linux-x86/bin
-              ls -l "$BIN/dalvikvm" "$BIN/dex2oat"
+              ls -l "$BIN/dalvikvm64" "$BIN/dex2oat"
               file "$BIN/dex2oat" | grep -q "ELF 64-bit" && echo "dex2oat 是 x86_64 ELF 可执行文件"
-              file "$BIN/dalvikvm" | grep -q "ELF 64-bit" && echo "dalvikvm 是 x86_64 ELF 可执行文件"
-              # 打印用法,证明二进制真的能跑起来(退出码不计入)
+              file "$BIN/dalvikvm64" | grep -q "ELF 64-bit" && echo "dalvikvm 是 x86_64 ELF 可执行文件"
+
+              # 打印用法,证明二进制真的能跑起来。
+              # 两点必须小心,否则脚本退出码会被污染:
+              #   1) 这两个二进制把 --help 当非法参数,自身退出码非 0;
+              #   2) 输出被 head 截断后,上游进程收到 SIGPIPE(退出码 141),
+              #      在 -o pipefail 下 141 会成为整条管道的状态,进而成为整个脚本的退出码。
+              # 因此:关掉 pipefail,给上游加 `|| true` 兜底,最后显式 exit 0。
               set +e
-              ANDROID_DATA=/tmp/ad "$BIN/dex2oat" --help 2>&1 | head -n 5
-              ANDROID_DATA=/tmp/ad "$BIN/dalvikvm" -help 2>&1 | head -n 5
+              set +o pipefail
+              { ANDROID_DATA=/tmp/ad "$BIN/dex2oat" --help 2>&1 || true; } | head -n 5
+              { ANDROID_DATA=/tmp/ad "$BIN/dalvikvm" -help 2>&1 || true; } | head -n 5
+              exit 0
             '
 
+      # 27 分钟的构建不能因为验收步骤失败就白跑,所以无论如何都上传产物。
       - name: 上传 ART host 产物
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: art-host-linux-x86_64
           path: |
-            aosp/out/host/linux-x86/bin/dalvikvm
+            aosp/out/host/linux-x86/bin/dalvikvm64
             aosp/out/host/linux-x86/bin/dalvikvm32
             aosp/out/host/linux-x86/bin/dex2oat
-            aosp/out/host/linux-x86/bin/dex2oatd
             aosp/out/host/linux-x86/lib64/libart*.so
+            aosp/out/host/linux-x86/lib64/libbase.so
           if-no-files-found: warn
 
       - name: 上传构建日志
